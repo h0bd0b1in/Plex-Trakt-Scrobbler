@@ -1,36 +1,36 @@
-from core.eventing import EventManager
-from core.helpers import get_pref
+from core.helpers import get_pref, try_convert
 from core.logger import Logger
 from data.watch_session import WatchSession
-from plex.plex_media_server import PlexMediaServer
-from plex.plex_metadata import PlexMetadata
 from pts.scrobbler import Scrobbler, ScrobblerMethod
+
+from plex import Plex
+from plex_activity import Activity
+from plex_metadata import Guid, Metadata
 
 
 log = Logger('pts.scrobbler_websocket')
 
 
 class WebSocketScrobbler(ScrobblerMethod):
-    name = 'WebSocketScrobbler'
+    name = 'websocket'
 
     def __init__(self):
         super(WebSocketScrobbler, self).__init__()
 
-        EventManager.subscribe('notifications.playing', self.update)
+        Activity.on('websocket.playing', self.update)
 
     @classmethod
     def test(cls):
-        if PlexMediaServer.get_sessions() is None:
+        if Plex['status'].sessions() is None:
             log.info("Error while retrieving sessions, assuming WebSocket method isn't available")
             return False
 
-        server_info = PlexMediaServer.get_info()
-        if server_info is None:
+        detail = Plex.detail()
+        if detail is None:
             log.info('Error while retrieving server info for testing')
             return False
 
-        multi_user = bool(server_info.get('multiuser', 0))
-        if not multi_user:
+        if not detail.multiuser:
             log.info("Server info indicates multi-user support isn't available, WebSocket method not available")
             return False
 
@@ -46,56 +46,54 @@ class WebSocketScrobbler(ScrobblerMethod):
 
         log.debug('Creating a WatchSession for the current media')
 
-        skip = False
-
-        info = PlexMediaServer.get_session(session_key)
-        if not info:
+        item = Plex['status'].sessions().get(session_key)
+        if not item:
+            log.warn('Unable to find session with key "%s"', session_key)
             return None
 
-        # Client
-        player_section = info.findall('Player')
-        if len(player_section):
-            player_section = player_section[0]
-
-        client = PlexMediaServer.get_client(player_section.get('machineIdentifier'))
-
         # Metadata
-        metadata = None
+        metadata = Metadata.get(item.rating_key)
 
-        try:
-            metadata = PlexMetadata.get(info.get('ratingKey'))
+        # Guid
+        guid = Guid.parse(metadata.guid) if metadata else None
 
-            if metadata:
-                metadata = metadata.to_dict()
-        except NotImplementedError, e:
-            # metadata not supported (music, etc..)
-            log.debug('%s, ignoring session' % e.message)
-            skip = True
+        # Create WatchSession
+        ws = WatchSession.from_session(item.session, metadata, guid, item.rating_key, state)
+        ws.skip = not metadata
 
-        session = WatchSession.from_section(info, state, metadata, client)
-        session.skip = skip
-        session.save()
+        # Fetch client by `machineIdentifier`
+        ws.client = Plex.clients().get(item.session.player.machine_identifier)
 
-        log.debug('created session: %s', session)
+        ws.save()
 
-        return session
+        log.debug('created session: %s', ws)
+        return ws
 
-    def update_session(self, session, view_offset):
-        log.debug('Trying to update the current WatchSession (session key: %s)' % session.key)
+    def update_session(self, ws, view_offset):
+        log.debug('Trying to update the current WatchSession (session key: %s)' % ws.key)
 
-        video_section = PlexMediaServer.get_session(session.key)
-        if not video_section:
+        sessions = Plex['status'].sessions()
+
+        if sessions is None:
+            log.warn('Unable to retrieve sessions')
+            return False
+
+        session = sessions.get(ws.key)
+
+        if not session:
             log.warn('Session was not found on media server')
+            self.finish(ws)
             return False
 
-        log.debug('last item key: %s, current item key: %s' % (session.item_key, video_section.get('ratingKey')))
+        log.debug('last item key: %s, current item key: %s' % (ws.rating_key, session.rating_key))
 
-        if session.item_key != video_section.get('ratingKey'):
+        if ws.rating_key != session.rating_key:
             log.debug('Invalid Session: Media changed')
+            self.finish(ws)
             return False
 
-        session.last_view_offset = view_offset
-        session.update_required = False
+        ws.last_view_offset = view_offset
+        ws.update_required = False
 
         return True
 
@@ -107,7 +105,7 @@ class WebSocketScrobbler(ScrobblerMethod):
             log.debug('Invalid Session: Missing metadata')
             return False
 
-        if session.metadata.get('duration', 0) <= 0:
+        if not session.metadata.duration or session.metadata.duration <= 0:
             log.debug('Invalid Session: Invalid duration')
             return False
 
@@ -140,12 +138,12 @@ class WebSocketScrobbler(ScrobblerMethod):
         # otherwise delete the session
         if update_session and not self.update_session(session, view_offset):
             log.debug('Media changed, deleting the session')
-            session.delete()
+            session.delete_instance()
             return None
 
         # Delete session if invalid
         if not self.session_valid(session):
-            session.delete()
+            session.delete_instance()
             return None
 
         if session.skip:
@@ -156,61 +154,62 @@ class WebSocketScrobbler(ScrobblerMethod):
 
             if not self.update_session(session, view_offset):
                 log.debug('Media changed, deleting the session')
-                session.delete()
+                session.delete_instance()
                 return None
 
         return session
 
-    def update(self, session_key, state, view_offset):
+    def update(self, info):
         # Ignore if scrobbling is disabled
         if not get_pref('scrobble'):
             return
 
-        session = self.get_session(session_key, state, view_offset)
-        if not session:
+        session_key = try_convert(info.get('sessionKey'), int)
+        state = info.get('state')
+        view_offset = info.get('viewOffset')
+
+        ws = self.get_session(session_key, state, view_offset)
+        if not ws:
             log.trace('Invalid or ignored session, nothing to do')
             return
 
         # Ignore sessions flagged as 'skip'
-        if session.skip:
+        if ws.skip:
             return
 
         # Validate session (check filters)
-        if not self.valid(session):
+        if not self.valid(ws):
             return
 
-        media_type = session.get_type()
-
         # Check if we are scrobbling a known media type
-        if not media_type:
-            log.info('Playing unknown item, will not be scrobbled: "%s"' % session.get_title())
-            session.skip = True
+        if not ws.type:
+            log.info('Playing unknown item, will not be scrobbled: "%s"' % ws.title)
+            ws.skip = True
             return
 
         # Check if the view_offset has jumped (#131)
-        if self.offset_jumped(session, view_offset):
+        if self.offset_jumped(ws, view_offset):
             log.info('View offset jump detected, ignoring the state update')
-            session.save()
+            ws.save()
             return
 
-        session.last_view_offset = view_offset
+        ws.last_view_offset = view_offset
 
         # Calculate progress
-        if not self.update_progress(session, view_offset):
+        if not self.update_progress(ws, view_offset):
             log.warn('Error while updating session progress, queued session to be updated')
-            session.update_required = True
-            session.save()
+            ws.update_required = True
+            ws.save()
             return
 
-        action = self.get_action(session, state)
+        action = self.get_action(ws, state)
 
         if action:
-            self.handle_action(session, media_type, action, state)
+            self.handle_action(ws, action)
         else:
-            log.debug(self.status_message(session, state)('Nothing to do this time for %s'))
-            session.save()
+            log.debug(self.status_message(ws, state)('Nothing to do this time for %s'))
+            ws.save()
 
-        if self.handle_state(session, state) or action:
-            Dict.Save()
+        self.handle_state(ws, state)
 
 Scrobbler.register(WebSocketScrobbler, weight=10)

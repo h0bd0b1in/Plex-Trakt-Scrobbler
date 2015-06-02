@@ -1,9 +1,14 @@
+from core.logger import Logger
+
+import hashlib
 import inspect
 import re
 import sys
 import threading
 import time
 import unicodedata
+
+log = Logger('core.helpers')
 
 
 PY25 = sys.version_info[0] == 2 and sys.version_info[1] == 5
@@ -52,7 +57,7 @@ def json_import():
     try:
         import simplejson as json
 
-        Log.Info("Using 'simplejson' module for JSON serialization")
+        log.info("Using 'simplejson' module for JSON serialization")
         return json, 'json'
     except ImportError:
         pass
@@ -61,7 +66,7 @@ def json_import():
     try:
         import json
 
-        Log.Info("Using 'json' module for JSON serialization")
+        log.info("Using 'json' module for JSON serialization")
         return json, 'json'
     except ImportError:
         pass
@@ -70,10 +75,10 @@ def json_import():
     try:
         import demjson
 
-        Log.Info("Using 'demjson' module for JSON serialization")
+        log.info("Using 'demjson' module for JSON serialization")
         return demjson, 'demjson'
     except ImportError:
-        Log.Warn("Unable to find json module for serialization")
+        log.warn("Unable to find json module for serialization")
         raise Exception("Unable to find json module for serialization")
 
 # Import json serialization module
@@ -151,7 +156,8 @@ def str_pad(s, length, align='left', pad_char=' ', trim=False):
     if not s:
         return s
 
-    s = str(s)
+    if not isinstance(s, (str, unicode)):
+        s = str(s)
 
     if len(s) == length:
         return s
@@ -215,14 +221,35 @@ def get_func_name(obj):
     return None
 
 
+def get_class_name(cls):
+    if not inspect.isclass(cls):
+        cls = getattr(cls, '__class__')
+
+    return getattr(cls, '__name__')
+
+
 def spawn(func, *args, **kwargs):
     thread_name = kwargs.pop('thread_name', None) or get_func_name(func)
 
-    thread = threading.Thread(target=func, name=thread_name, args=args, kwargs=kwargs)
+    def wrapper(thread_name, args, kwargs):
+        try:
+            func(*args, **kwargs)
+        except Exception, ex:
+            log.error('Thread "%s" raised an exception: %s', thread_name, ex, exc_info=True)
 
-    thread.start()
+    thread = threading.Thread(target=wrapper, name=thread_name, args=(thread_name, args, kwargs))
 
-    Log.Debug("Spawned thread with name '%s'" % thread_name)
+    try:
+        thread.start()
+        log.debug("Spawned thread with name '%s'" % thread_name)
+    except thread.error, ex:
+        log.error('Unable to spawn thread: %s', ex, exc_info=True, extra={
+            'data': {
+                'active_count': threading.active_count()
+            }
+        })
+        return None
+
     return thread
 
 
@@ -296,7 +323,7 @@ def get_filter(key, normalize_values=True):
 
         # Normalize values (if enabled)
         if normalize_values:
-            value = normalize(value)
+            value = flatten(value)
 
         # Append value to list
         if not inverted:
@@ -316,7 +343,15 @@ def normalize(text):
         text = unicodedata.normalize('NFKD', text)
 
     # Ensure text is ASCII, ignore unknown characters
-    text = text.encode('ascii', 'ignore')
+    return text.encode('ascii', 'ignore')
+
+
+def flatten(text):
+    if text is None:
+        return None
+
+    # Normalize `text` to ascii
+    text = normalize(text)
 
     # Remove special characters
     text = re.sub('[^A-Za-z0-9\s]+', '', text)
@@ -326,3 +361,11 @@ def normalize(text):
 
     # Convert to lower-case
     return text.lower()
+
+
+def md5(value):
+    # Generate MD5 hash of key
+    m = hashlib.md5()
+    m.update(value)
+
+    return m.hexdigest()

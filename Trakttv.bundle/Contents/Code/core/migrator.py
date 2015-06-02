@@ -1,6 +1,7 @@
 from core.helpers import all
 from core.logger import Logger
-from core.plugin import PLUGIN_VERSION_BASE
+from plugin.core.constants import PLUGIN_VERSION_BASE
+
 from lxml import etree
 import shutil
 import os
@@ -28,6 +29,10 @@ class Migration(object):
         return Core.code_path
 
     @property
+    def lib_path(self):
+        return os.path.join(self.code_path, '..', 'Libraries')
+
+    @property
     def plex_path(self):
         return os.path.abspath(os.path.join(self.code_path, '..', '..', '..', '..'))
 
@@ -37,7 +42,7 @@ class Migration(object):
 
     def get_preferences(self):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return {}
 
         data = Core.storage.load(self.preferences_path)
@@ -47,7 +52,7 @@ class Migration(object):
 
     def set_preferences(self, changes):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return False
 
         data = Core.storage.load(self.preferences_path)
@@ -86,15 +91,83 @@ class Migration(object):
 
 
 class Clean(Migration):
-    tasks_upgrade = [
+    tasks_code = [
         (
             'delete_file', [
+                # /core
+                'core/environment.py',
+                'core/eventing.py',
+                'core/model.py',
+                'core/network.py',
                 'core/trakt.py',
                 'core/trakt_objects.py',
+
+                # /data
+                'data/client.py',
                 'data/dict_object.py',
-                'plex/media_server.py',
+                'data/model.py',
+                'data/user.py',
+
+                # /pts
+                'pts/activity.py',
+                'pts/activity_logging.py',
+                'pts/activity_websocket.py',
+
+                # /sync
+                'sync/base.py',
+                'sync/legacy.py',
+                'sync/manager.py',
+                'sync/task.py',
+
+                # /
                 'sync.py'
             ], os.path.isfile
+        ),
+        (
+            'delete_directory', [
+                'plex'
+            ], os.path.isdir
+        )
+    ]
+
+    tasks_lib = [
+        (
+            'delete_file', [
+                # asio
+                'Shared/asio.py',
+                'Shared/asio_base.py',
+                'Shared/asio_posix.py',
+                'Shared/asio_windows.py',
+                'Shared/asio_windows_interop.py',
+
+                # plex
+                'Shared/plex/core/compat.py',
+                'Shared/plex/core/event.py',
+                'Shared/plex/interfaces/library.py',
+
+                # plex.metadata.py
+                'Shared/plex_metadata/core/cache.py',
+
+                # requests
+                'Shared/requests/packages/urllib3/util.py',
+
+                # trakt.py
+                'Shared/trakt/core/context.py',
+                'Shared/trakt/interfaces/base/media.py',
+                'Shared/trakt/interfaces/account.py',
+                'Shared/trakt/interfaces/rate.py',
+                'Shared/trakt/interfaces/sync/base.py',
+                'Shared/trakt/media_mapper.py',
+                'Shared/trakt/request.py'
+            ], os.path.isfile
+        ),
+        (
+            'delete_directory', [
+                # trakt.py
+                'Shared/trakt/interfaces/movie',
+                'Shared/trakt/interfaces/show',
+                'Shared/trakt/interfaces/user'
+            ], os.path.isdir
         )
     ]
 
@@ -103,9 +176,10 @@ class Clean(Migration):
             self.upgrade()
 
     def upgrade(self):
-        self.execute(self.tasks_upgrade, 'upgrade')
+        self.execute(self.tasks_code, 'upgrade', self.code_path)
+        self.execute(self.tasks_lib, 'upgrade', self.lib_path)
 
-    def execute(self, tasks, name):
+    def execute(self, tasks, name, base_path):
         for action, paths, conditions in tasks:
             if type(paths) is not list:
                 paths = [paths]
@@ -114,16 +188,22 @@ class Clean(Migration):
                 conditions = [conditions]
 
             if not hasattr(self, action):
-                log.warn('Unknown migration action "%s"', action)
+                log.error('Unknown migration action "%s"', action)
                 continue
 
             m = getattr(self, action)
 
             for path in paths:
-                log.debug('(%s) %s: "%s"', name, action, path)
+                path = os.path.join(base_path, path)
+                path = os.path.abspath(path)
 
-                if m(os.path.join(self.code_path, path), conditions):
-                    log.debug('(%s) %s: "%s" - finished', name, action, path)
+                # Remove file
+                if m(path, conditions):
+                    log.info('(%s) %s: "%s"', name, action, path)
+
+                # Remove .pyc files as-well
+                if path.endswith('.py') and m(path + 'c', conditions):
+                    log.info('(%s) %s: "%s"', name, action, path + 'c')
 
 
 class ForceLegacy(Migration):
@@ -134,7 +214,7 @@ class ForceLegacy(Migration):
 
     def upgrade(self):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return
 
         preferences = self.get_preferences()
