@@ -37,7 +37,7 @@ class Method(object):
         try:
             self.run()
         except Exception, ex:
-            log.error(traceback.format_exc())
+            log.error('Exception raised in %r method: %s', self.name, ex, exc_info=True)
 
     def run(self):
         raise NotImplementedError()

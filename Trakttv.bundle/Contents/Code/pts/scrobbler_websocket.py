@@ -50,6 +50,7 @@ class WebSocketScrobbler(ScrobblerMethod):
 
         item = Plex['status'].sessions().get(session_key)
         if not item:
+            log.warn('Unable to find session with key "%s"', session_key)
             return None
 
         # Metadata
@@ -204,7 +205,7 @@ class WebSocketScrobbler(ScrobblerMethod):
         action = self.get_action(ws, state)
 
         if action:
-            self.handle_action(ws, ws.type, action, state)
+            self.handle_action(ws, action)
         else:
             log.debug(self.status_message(ws, state)('Nothing to do this time for %s'))
             ws.save()

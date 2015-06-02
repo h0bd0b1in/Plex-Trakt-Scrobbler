@@ -1,12 +1,31 @@
-from core.helpers import build_repr
-from data.model import Model
+from core.helpers import build_repr, spawn
+from core.logger import Logger
+from plugin.data.model import Model, Property
 
 from jsonpickle.unpickler import ClassRegistry
 from plex_metadata import Matcher
+from Queue import PriorityQueue
+from threading import Lock
+import Queue
+
+
+log = Logger('pts.scrobbler')
 
 
 class WatchSession(Model):
     group = 'WatchSession'
+
+    deleted = Property(False, pickle=False)
+
+    # Requests/Actions
+    action_manager = Property(None, pickle=False)
+    action_queued = Property(lambda: Lock(), pickle=False)
+
+    action_queue = Property(lambda: PriorityQueue(), pickle=False)
+    action_thread = Property(None, pickle=False)
+
+    actions_sent = Property(lambda: [])
+    actions_performed = Property(lambda: [])
 
     def __init__(self, key, metadata, guid, state, session=None):
         super(WatchSession, self).__init__(key)
@@ -19,10 +38,10 @@ class WatchSession(Model):
         self.client = None
 
         # States
+        self.active = False
+
         self.skip = False
         self.filtered = False
-        self.scrobbled = False
-        self.watching = False
 
         # Multi-episode scrobbling
         self.cur_episode = None
@@ -84,10 +103,121 @@ class WatchSession(Model):
         self.user_ = value
 
     def reset(self):
-        self.scrobbled = False
-        self.watching = False
+        self.active = False
 
         self.last_updated = Datetime.FromTimestamp(0)
+
+    def queue(self, action, request, priority=3):
+        if priority == 0:
+            log.info('Maximum retries exceeded for "%s" action', action)
+            return False
+
+        # Store in queue
+        self.action_queue.put((priority, action, request))
+
+        log.debug('Queued "%s" action (priority: %s)', action, priority)
+
+        # Ensure action thread has started
+        if not self.action_thread:
+            self.action_thread = spawn(self.process_actions)
+
+        return True
+
+    def process_actions(self):
+        log.debug('process_actions() thread - started')
+
+        while not self.deleted:
+            self.action_queued.acquire()
+
+            # Wait for an action
+            try:
+                priority, action, request = self.action_queue.get(timeout=30)
+            except Queue.Empty:
+                self.action_queued.release()
+                continue
+
+            log.debug('Processing "%s" action (priority: %s)', action, priority)
+
+            # Ensure we don't send duplicate actions
+            if self.actions_sent and self.actions_sent[-1] == action:
+                log.info('Ignoring duplicate "%s" action', action)
+
+                self.action_queued.release()
+                continue
+
+            # Only send a "start" action if we haven't scrobbled yet
+            if action == 'start' and 'scrobble' in self.actions_performed:
+                log.info('Ignoring "%s" action, session already scrobbled', action)
+
+                self.action_queued.release()
+                continue
+
+            # Queue action with `ActionManager`
+            self.action_manager.queue_scrobble(
+                self.metadata.rating_key,
+                action, request,
+
+                callback=self.on_action_response
+            )
+
+            # Update action history
+            self.actions_sent.append(action)
+
+        log.debug('process_actions() thread - finished')
+
+    def on_action_response(self, response, priority, item):
+        # Get request details
+        kwargs = item.get('kwargs', {})
+        action = kwargs.get('action')
+
+        # Check if response failed
+        if not response:
+            log.warn('Unable to send "%s" action', action)
+
+            # Request failed, release the lock
+            self.action_queued.release()
+            return
+
+        # Get response details
+        performed = response.get('action')
+
+        log.debug('Performed "%s" action on trakt.tv', performed)
+        self.actions_performed.append(performed)
+
+        # Action performed, release the lock (so another action can be sent)
+        self.action_queued.release()
+
+    def delete(self):
+        super(WatchSession, self).delete()
+
+        # Set `deleted` flag
+        self.deleted = True
+
+    @classmethod
+    def configure(cls, action_manager):
+        cls.action_manager = action_manager
+
+    @classmethod
+    def is_active(cls, rating_key, f_validate=None):
+        if not rating_key:
+            return False
+
+        # Ensure `rating_key` is a string
+        rating_key = str(rating_key)
+
+        sessions = cls.all(lambda ws:
+            ws.metadata and
+            ws.metadata.rating_key == rating_key
+        )
+
+        for key, ws in sessions:
+            if f_validate and not f_validate(ws):
+                continue
+
+            if ws.active:
+                return True
+
+        return False
 
     @staticmethod
     def from_session(session, metadata, guid, state):

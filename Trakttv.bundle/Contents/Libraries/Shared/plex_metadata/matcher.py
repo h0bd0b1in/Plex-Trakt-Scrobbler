@@ -17,7 +17,7 @@ class Matcher(object):
         try:
             from caper import Caper
             return Caper()
-        except ImportError, ex:
+        except ImportError as ex:
             log.info('Caper not available - "%s"', ex)
             return None
 
@@ -38,6 +38,9 @@ class Matcher(object):
         if identifier is None and self.caper:
             # Parse file_name with Caper
             result = self.caper.parse(file_name)
+
+            if not result:
+                return None
 
             chain = result.chains[0] if result.chains else None
 
@@ -75,11 +78,14 @@ class Matcher(object):
         # Find new episodes from identifiers
         c_episodes = [p_episode]
 
-        # Add extended episodes
-        c_episodes.extend(self.extend_episode(episode.media.parts, (p_season, p_episode)))
+        if episode.media and episode.media.parts:
+            # Add extended episodes
+            c_episodes.extend(self.extend_episode(episode.media.parts, (p_season, p_episode)))
 
-        # Remove any episode identifiers that are more than 1 away
-        c_episodes = self.remove_distant(c_episodes, p_episode)
+            # Remove any episode identifiers that are more than 1 away
+            c_episodes = self.remove_distant(c_episodes, p_episode)
+        else:
+            log.warn('Item with key "%s" has no media parts, unable to use the extended matcher', episode.rating_key)
 
         return p_season, c_episodes
 

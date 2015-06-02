@@ -1,6 +1,7 @@
 from core.helpers import get_pref
 from core.logger import Logger
 from data.watch_session import WatchSession
+from plex.objects.client import Client
 from plex.objects.user import User
 from pts.scrobbler import Scrobbler, ScrobblerMethod
 
@@ -58,6 +59,15 @@ class LoggingScrobbler(ScrobblerMethod):
 
         # Fetch client by `machineIdentifier`
         ws.client = Plex.clients().get(info['machineIdentifier'])
+
+        if not ws.client:
+            # Create dummy client from `info`
+            ws.client = Client(Plex.client, 'clients')
+            ws.client.name = info.get('client', None)
+            ws.client.machine_identifier = info.get('machineIdentifier', None)
+
+            ws.client.address = info.get('address', None)
+            ws.client.port = info.get('port', None)
 
         # Create dummy user from `info`
         ws.user = User(Plex.client, 'accounts')
@@ -148,7 +158,7 @@ class LoggingScrobbler(ScrobblerMethod):
         action = self.get_action(ws, info['state'])
 
         if action:
-            self.handle_action(ws, ws.type, action, info['state'])
+            self.handle_action(ws, action)
         else:
             log.debug(self.status_message(ws, info.get('state'))('Nothing to do this time for %s'))
             ws.save()

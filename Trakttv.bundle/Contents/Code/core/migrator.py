@@ -42,7 +42,7 @@ class Migration(object):
 
     def get_preferences(self):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return {}
 
         data = Core.storage.load(self.preferences_path)
@@ -52,7 +52,7 @@ class Migration(object):
 
     def set_preferences(self, changes):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return False
 
         data = Core.storage.load(self.preferences_path)
@@ -104,6 +104,7 @@ class Clean(Migration):
                 # /data
                 'data/client.py',
                 'data/dict_object.py',
+                'data/model.py',
                 'data/user.py',
 
                 # /pts
@@ -128,12 +129,34 @@ class Clean(Migration):
     tasks_lib = [
         (
             'delete_file', [
-                'Shared/asio.py',                 'Shared/asio.pyc',
-                'Shared/asio_base.py',            'Shared/asio_base.pyc',
-                'Shared/asio_posix.py',           'Shared/asio_posix.pyc',
-                'Shared/asio_windows.py',         'Shared/asio_windows.pyc',
-                'Shared/asio_windows_interop.py', 'Shared/asio_windows_interop.pyc'
+                # asio
+                'Shared/asio.py',                           'Shared/asio.pyc',
+                'Shared/asio_base.py',                      'Shared/asio_base.pyc',
+                'Shared/asio_posix.py',                     'Shared/asio_posix.pyc',
+                'Shared/asio_windows.py',                   'Shared/asio_windows.pyc',
+                'Shared/asio_windows_interop.py',           'Shared/asio_windows_interop.pyc',
+
+                # plex
+                'Shared/plex/core/compat.py',               'Shared/plex/core/compat.pyc',
+                'Shared/plex/core/event.py',                'Shared/plex/core/event.pyc',
+
+                # plex.metadata.py
+                'Shared/plex_metadata/core/cache.py',       'Shared/plex_metadata/core/cache.pyc',
+
+                # trakt.py
+                'Shared/trakt/interfaces/base/media.py',    'Shared/trakt/interfaces/base/media.pyc',
+                'Shared/trakt/interfaces/account.py',       'Shared/trakt/interfaces/account.pyc',
+                'Shared/trakt/interfaces/rate.py',          'Shared/trakt/interfaces/rate.pyc',
+                'Shared/trakt/request.py',                  'Shared/trakt/request.pyc',
             ], os.path.isfile
+        ),
+        (
+            'delete_directory', [
+                # trakt.py
+                'Shared/trakt/interfaces/movie',
+                'Shared/trakt/interfaces/show',
+                'Shared/trakt/interfaces/user'
+            ], os.path.isdir
         )
     ]
 
@@ -154,7 +177,7 @@ class Clean(Migration):
                 conditions = [conditions]
 
             if not hasattr(self, action):
-                log.warn('Unknown migration action "%s"', action)
+                log.error('Unknown migration action "%s"', action)
                 continue
 
             m = getattr(self, action)
@@ -175,7 +198,7 @@ class ForceLegacy(Migration):
 
     def upgrade(self):
         if not os.path.exists(self.preferences_path):
-            log.warn('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
+            log.error('Unable to find preferences file at "%s", unable to run migration', self.preferences_path)
             return
 
         preferences = self.get_preferences()

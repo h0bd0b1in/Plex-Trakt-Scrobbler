@@ -1,10 +1,12 @@
 from core.helpers import try_convert
+from core.logger import Logger
 
 from plex.objects.library.metadata.episode import Episode
-from plex_metadata import Guid
-import logging
+from plex.objects.library.metadata.movie import Movie
+from plex.objects.library.metadata.show import Show
+from plex_metadata import Guid, Matcher
 
-log = logging.getLogger(__name__)
+log = Logger('core.action')
 
 
 class PlexHelper(object):
@@ -16,19 +18,13 @@ class PlexHelper(object):
         return p_item
 
     @classmethod
-    def to_trakt(cls, key, p_item, include_identifier=True, guid=None, year=None):
+    def to_trakt(cls, key, p_item, guid=None, year=None, strict=True):
         data = {}
 
-        # Append episode attributes if this is a PlexEpisode
-        if isinstance(p_item, Episode):
-            k_season, k_episode = key
+        if type(p_item) is Episode:
+            data['number'] = key
 
-            data.update({
-                'season': k_season,
-                'episode': k_episode
-            })
-
-        if include_identifier:
+        if type(p_item) is Movie or type(p_item) is Show:
             p_root = cls.get_root(p_item)
 
             data['title'] = p_root.title
@@ -40,28 +36,56 @@ class PlexHelper(object):
             elif p_item.year is not None:
                 data['year'] = p_item.year
 
-            ActionHelper.set_identifier(data, guid or p_root.guid)
+            # Set identifier on movie/show objects
+            return ActionHelper.set_identifier(data, guid or p_root.guid, strict=strict)
 
         return data
 
 
+class TraktHelper(object):
+    @classmethod
+    def episodes(cls, episodes):
+        result = []
+
+        for episode in episodes:
+            _, episodes = Matcher.process(episode)
+
+            for episode_num in episodes:
+                result.append({
+                    'number': episode_num
+                })
+
+        return result
+
+
 class ActionHelper(object):
     plex = PlexHelper
+    trakt = TraktHelper
 
     @classmethod
-    def set_identifier(cls, values, guid):
+    def set_identifier(cls, data, guid, strict=True):
         if not guid:
-            return
+            return None
 
         if type(guid) is str:
             # Parse raw guid
             guid = Guid.parse(guid)
 
+        if 'ids' not in data:
+            data['ids'] = {}
+
+        ids = data['ids']
+
         if guid.agent == 'imdb':
-            values['imdb_id'] = guid.sid
-        elif guid.agent == 'themoviedb':
-            values['tmdb_id'] = try_convert(guid.sid, int)
-        elif guid.agent == 'thetvdb':
-            values['tvdb_id'] = try_convert(guid.sid, int)
+            ids['imdb'] = guid.sid
+        elif guid.agent == 'tmdb':
+            ids['tmdb'] = try_convert(guid.sid, int)
+        elif guid.agent == 'tvdb':
+            ids['tvdb'] = try_convert(guid.sid, int)
+        elif not strict:
+            log.info('Unknown Guid agent: "%s"', guid.agent)
         else:
-            log.warn('Unknown GUID agent "%s"', guid.agent)
+            log.info('Unknown Guid agent: "%s" [strict]', guid.agent)
+            return None
+
+        return data

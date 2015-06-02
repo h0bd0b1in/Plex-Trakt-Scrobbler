@@ -3,6 +3,7 @@ from core.helpers import total_seconds, get_pref
 from core.localization import localization
 from core.logger import Logger
 from data.sync_status import SyncStatus
+from plugin.core.event import Global as EG
 from sync.sync_base import CancelException
 from sync.sync_statistics import SyncStatistics
 from sync.sync_task import SyncTask
@@ -65,6 +66,8 @@ class SyncManager(object):
 
         # Bind activity events
         Activity.on('websocket.scanner.finished', cls.scanner_finished)
+
+        EG['SyncManager.current'].set(lambda: cls.current)
 
         cls.initialized = True
 
@@ -162,46 +165,35 @@ class SyncManager(object):
     def run_work(cls):
         # Get work details
         key = cls.current.key
-        kwargs = cls.current.kwargs or {}
+        kwargs = cls.current.kwargs.copy() or {}
         section = kwargs.pop('section', None)
 
         # Find handler
         handler = cls.handlers.get(key)
         if not handler:
-            log.warn('Unknown handler "%s"' % key)
+            log.error('Unknown handler "%s"' % key)
             return False
 
-        sid = uuid.uuid4()
-
-        log.debug('Processing work with sid "%s" (handler: %r, kwargs: %r)' % (sid, key, kwargs))
-
-        # Create "http" cache for this task
-        http_cache = CacheManager.open('http.%s' % sid)
+        log.debug('Processing work with sid "%s" (handler: %r, kwargs: %r)' % (cls.current.sid, key, kwargs))
 
         success = False
 
         try:
-            with Plex.configuration.cache(http=http_cache):
-                success = handler.run(section=section, **kwargs)
+            success = handler.run(section=section, **kwargs)
         except CancelException, e:
             handler.update_status(False)
+
             log.info('Task "%s" was cancelled', key)
-        except Exception, e:
+        except Exception, ex:
             handler.update_status(False)
 
-            log.warn('Exception raised in handler for "%s" (%s) %s: %s' % (
-                key, type(e), e, traceback.format_exc()
-            ))
+            log.error('Exception raised in handler for %r: %s', key, ex, exc_info=True)
 
         log.debug(
-            'Cache Statistics - len(http): %s, len(matcher): %s, len(metadata): %s',
-            len(http_cache),
+            'Cache Statistics - len(matcher): %s, len(metadata): %s',
             len(CacheManager.get('matcher')),
             len(CacheManager.get('metadata'))
         )
-
-        # Discard HTTP cache
-        CacheManager.delete('http.%s' % sid)
 
         # Sync "matcher" cache (back to disk)
         CacheManager.get('matcher').sync()
